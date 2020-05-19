@@ -1,0 +1,786 @@
+---
+title: "Pricing Analytics Project--Choice Data & Choice Model"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library("dummies")
+library("AER")
+library("plotly")
+library('RColorBrewer')
+library("rgl")
+library("data.table")
+library("mlogit")
+library("gmnl")
+
+require("cluster")
+require("fpc")
+require("factoextra")
+require("gridExtra")
+library(cluster)
+library(fpc)
+library(factoextra)
+library(gridExtra)
+```
+
+## Including Plots
+
+```{r}
+rm(list = ls())
+```
+
+
+```{r }
+# Read data
+data=fread("kiwi_bubbles_P2.csv",stringsAsFactors = F)
+
+# summary(data)
+
+# Data cleaning - drop periods with price=99 (stockout).
+data=data[!(data$price.MB==99),]
+```
+
+###### 1)without segments #####
+Assume first that βj0 and β1 are common across consumers. In this case, the model collapses to a
+simple multinomial logit model. Follow (almost) exactly the lecture notes and estimate the model.
+Using the estimated parameters, calculate own- and cross-price elasticities for all combination of
+products, evaluated at the average prices observed in the data. Do you see any particular patterns?
+Are the patterns reasonable, or something you are concerned about? Explain why (why not).
+Finally, calculate optimal prices for KB and KR (note that you have two products) to maximize
+the profit when Mango price is P MB = 1.43.
+
+```{r}
+###### no segments #####
+# Multinomial logit: illustration
+#Estimate a logit model using gnml
+
+#Estimate single segment logit as a point of comparison
+#Convert it to mlogit.data form. 
+mlogitdata=mlogit.data(data,id="id",varying=4:7,choice="choice",shape="wide")
+
+#Run MLE.
+mle_noseg= gmnl(choice ~  price, data = mlogitdata)
+summary(mle_noseg)
+coef_noseg=mle_noseg$coefficients
+
+#Evaluate at average price
+priceKB = mean(data$price.KB)
+priceKR = mean(data$price.KR)
+priceMB = mean(data$price.MB)
+
+# #demand function
+demand=function(priceKB,priceKR,priceMB,para){
+    probKB=exp(para[1]+para[4]*priceKB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+    probKR=exp(para[2]+para[4]*priceKR)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+    probMB=exp(para[3]+para[4]*priceMB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+    return(cbind(probKB,probKR,probMB))
+}
+# demand(priceKB,priceKR,priceMB,coef_noseg)
+#                   probKB    probKR    probMB
+# KB:(intercept) 0.1753666 0.1979974 0.1908972
+```
+The coefficients mean that we have similar preference toward each product.
+β0KB = 4.25
+β0KR = 4.36
+β0MB = 4.20
+β1 = -3.74
+(all products are chosen at same frequency)
+
+
+
+###elasticity###
+```{r}
+# elasticity
+elasticity = function(priceKB,priceKR,priceMB,para){
+    E_KB = para[4]*priceKB*(1-demand(priceKB,priceKR,priceMB,para)[1])
+    E_KR = para[4]*priceKR*(1-demand(priceKB,priceKR,priceMB,para)[2])
+    E_MB = para[4]*priceMB*(1-demand(priceKB,priceKR,priceMB,para)[3])
+
+    Ec_KR = -para[4]*priceKR*demand(priceKB,priceKR,priceMB,para)[2]
+    Ec_MB = -para[4]*priceMB*demand(priceKB,priceKR,priceMB,para)[3]
+    Ec_KB = -para[4]*priceKB*demand(priceKB,priceKR,priceMB,para)[1]
+    #return(c(E_KB,E_KR,E_MB,Ec_KR,Ec_MB,Ec_KB))
+    elas = c(E_KB,Ec_KB,Ec_KB,Ec_KR,E_KR,Ec_KR,Ec_MB,Ec_MB,E_MB)
+    elasmat = matrix(elas,3,3,dimnames = list(c("KB","KR","MB"),
+                               c("KB","KR","MB")))
+    return(elasmat)
+
+}
+
+elasticity(priceKB,priceKR,priceMB,coef_noseg)
+#            KB        KR         MB
+# KB -4.2578474  1.019923  0.9601564
+# KR  0.9054743 -4.131270  0.9601564
+# MB  0.9054743  1.019923 -4.0695469
+```
+interpretation of elastisity:  (substitution pattern)
+
+1)own-elas:almost the same,around 4.(yes we should expect.use the formula):
+           same frequency//choice prob is identical//avg price is also identical//β1 is identical. 
+
+2)cross-elas:does not depend on destination
+this is a really restrict assumption of our Logit Model    ,and also pretty wierd, called"independence from irrelevant alternatives":
+if consumers switch away from a product, they will switch to other products with equal proportion regardless the charicristic of those products (but the truth can never be like this) 
+(so it is a wrong subsitution pattern)
+
+*Adding hetero in segments will mitigate this issue.
+
+
+
+
+###profit maximazing price###
+```{r}
+
+# price for MB
+priceMB_3 = 1.43
+
+# Unit cost
+uc=0.5
+
+# market size is 1000 consumers.
+
+#Write profit as a function of prices we set and model parameters
+profit=function(priceKB,priceKR,priceMB,para){
+    profitKB=demand(priceKB,priceKR,priceMB,para)[,1]*(priceKB-0.5)*1000
+    profitKR=demand(priceKB,priceKR,priceMB,para)[,2]*(priceKR-0.5)*1000
+    return(cbind(profitKB,profitKR))
+}
+
+#Choose space of prices to search for the optimal price over
+aux=seq(1,3,0.01)
+
+#Because we search over two dimensions, create complete combination 
+#of the two prices
+pricespace=expand.grid(aux,aux)
+
+#Compute profit at each realization of this price space.
+#I write for-loop. While there are ways to get this done in a vectorized way,
+#this for-loop code probably helps some in project 2.
+
+#At each iteration of the loop, I take one realization of [P^KB,P^KR] pair and evaluate
+#profit at that realization.
+profitmat=matrix(0L,nrow(pricespace),1)
+for (i in 1:nrow(pricespace)){
+    profitmat[i]=sum(profit(pricespace[i,1],pricespace[i,2],priceMB_3,coef_noseg))  
+}
+
+#Draw 3D figure
+xaxis=list(title="P^{KB}")
+yaxis=list(autorange = "reversed",title="P^{KR}")
+zaxis=list(title="Profit")
+p=plot_ly(x=pricespace[,1],y=pricespace[,2],z=as.numeric(profitmat),
+          type="scatter3d",mode="markers",
+          marker = list(color = as.numeric(profitmat), colorscale = c('#FFE1A1', '#683531'), showscale = TRUE))%>%
+    layout(scene=list(xaxis=xaxis,yaxis=yaxis,zaxis=zaxis))%>%
+    config(mathjax = 'cdn')
+p
+
+
+#answer for optimal price
+price_profit = cbind(pricespace,profitmat)
+price_profit[which.max(profitmat),]
+
+```
+The exactly same optimal price, is making sense based on identical elas and substitution patterns.
+
+
+
+###### 2) Logit model with segmentation ###
+Now, use the estimated model to analyze and report 
+(1) the strategic importance of launching Kiwi Bubbles
+(2) optimal pricing of KB and KR. In particular, consider the following questions
+(you may also consider other relevant questions if necessary).
+```{r}
+###### Logit model with segmentation #######
+demo=fread("demo_P2.csv",stringsAsFactors = F)
+```
+
+```{r}
+summary(demo)
+```
+
+## cluster: k = 10
+
+```{r}
+#Number of individuals
+N = 329
+
+#Clustering
+#(using all demo columns,no need to interpret "who each cluster is", some are hard to explain.)
+demo_cluster = kmeans(x=demo[,2:18], centers = 10 , nstart = 1000)
+
+# now combine cluster identity into the raw data
+cluster_id = data.frame(id = demo$id)
+cluster_id$cluster = demo_cluster$cluster
+data = merge(data, cluster_id, by = "id", all.x = T)
+
+# for those who don't fit in any cluster, group them into one additional cluster
+data$cluster[is.na(data$cluster)] = 11
+
+# segment share
+seg.share = c( table(demo_cluster$cluster),N - sum(table(demo_cluster$cluster))) / N	
+seg.share  
+
+# just store the coefficients (you can store many other things)
+coef.est = data.frame(segment = 1:11, intercept.KB = NA, intercept.KR = NA, 
+                      intercept.MB = NA, price.coef = NA) 
+
+
+#Write a for-loop to run model in subsamples 
+for (seg in 1:11) {
+  # During each loop, pick subset of data of consumers from each segment.
+  data.sub = subset(data, cluster == seg)
+  
+  #Using that data, the rest remains the same.
+  mlogitdata=mlogit.data(data.sub,id="id",varying=4:7,choice="choice",shape="wide")
+  
+  #Run MLE.
+  mle= gmnl(choice ~  price, data = mlogitdata)
+  mle
+  #Store the outcome in the coef.est matrix.
+  coef.est[seg, 2:5] = mle$coefficients
+}
+
+coef.est
+```
+
+
+why we choose 10 clusters?
+We should choose as many clusters as possible to more flexiblely capture demand systems.
+We want to get reasonable dispersion.
+
+Cluster means:
+Should we cluster on categorical variable, such as occupations?
+I think it's fine. We cluster on similarity, but we don't care about why pilot and nurse may have similar preference patterns.
+And also, here looking at the mean value of categorical variable is meaningless.
+
+
+
+#Plot results
+```{r}
+# demand=function(priceKB,priceKR,priceMB,para){
+#   prob=exp(para[1]+para[4]*priceKB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+#   return(prob)
+# }
+pricespace=seq(0,1.8,0.01)
+
+plot(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[1,2:5]))[,1],type='l',xlab='Prices',
+     ylab='Probability of purchase',col="blue",lwd=20*seg.share[1],ylim = c(0.1,1),
+     cex=2,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[3,2:5]))[,1],col="blue",lwd=20*seg.share[3])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[4,2:5]))[,1],col="blue",lwd=20*seg.share[4])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[5,2:5]))[,1],col="blue",lwd=20*seg.share[5])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[6,2:5]))[,1],col="blue",lwd=20*seg.share[6])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[2,2:5]))[,1],col="blue",lwd=20*seg.share[2])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[7,2:5]))[,1],col="blue",lwd=20*seg.share[7])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[8,2:5]))[,1],col="blue",lwd=20*seg.share[8])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[9,2:5]))[,1],col="blue",lwd=20*seg.share[9])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[10,2:5]))[,1],col="blue",lwd=20*seg.share[10])
+lines(pricespace,demand(pricespace,mean(data$price.KR),mean(data$price.MB),as.numeric(coef.est[11,2:5]))[,1],col="blue",lwd=20*seg.share[11])
+
+```
+
+
+
+# segment and aggregate demand function
+```{r}
+
+#segment-demand-matrix
+demand.seg = function(priceKB,priceKR,priceMB,para){
+  #define data  frame and list/ or matrix 
+  Prob_KB=list()
+  Prob_KR=list()
+  Prob_MB=list()
+  df_prob = data.frame(seg = NA, Prob_KB= NA,Prob_KR= NA,Prob_MB= NA)
+
+  for (i in 1:nrow(para)){
+    Prob_KB[i] = exp(para[[2]][i]+para[[5]][i]*priceKB)/(1+exp(para[[2]][i]+para[[5]][i]*priceKB)+exp(para[[3]][i]+para[[5]][i]*priceKR)+exp(para[[4]][i]+para[[5]][i]*priceMB))
+    Prob_KR[i] = exp(para[[3]][i]+para[[5]][i]*priceKR)/(1+exp(para[[2]][i]+para[[5]][i]*priceKB)+exp(para[[3]][i]+para[[5]][i]*priceKR)+exp(para[[4]][i]+para[[5]][i]*priceMB))
+    Prob_MB[i] = exp(para[[4]][i]+para[[5]][i]*priceMB)/(1+exp(para[[2]][i]+para[[5]][i]*priceKB)+exp(para[[3]][i]+para[[5]][i]*priceKR)+exp(para[[4]][i]+para[[5]][i]*priceMB))
+    df_prob[i,] = c(i,Prob_KB[i],Prob_KR[i],Prob_MB[i])
+  }
+  return(df_prob)
+    
+}
+
+demand_seg = demand.seg(priceKB,priceKR,priceMB,coef.est)
+
+
+#aggregate-demand-function
+demand.agg = function(priceKB,priceKR,priceMB,para){
+  demand = colSums((seg.share)*demand.seg(priceKB,priceKR,priceMB,para))[2:4]
+  return(demand)
+}
+
+demand_agg = demand.agg(priceKB,priceKR,priceMB,coef.est)
+
+```
+
+
+
+###segment-elasticity
+```{r}
+##### using the defination of elasticity #####
+##using agg-level demand###
+
+elasmat2 = matrix(0,3,3,dimnames = list(c("KB","KR","MB"),
+                               c("KB","KR","MB")))
+demand_agg1 = demand.agg(priceKB*1.01,priceKR,priceMB,coef.est)
+demand_agg2 = demand.agg(priceKB,priceKR*1.01,priceMB,coef.est)
+demand_agg3 = demand.agg(priceKB,priceKR,priceMB*1.01,coef.est)
+
+for(i in 1:3){
+  elasmat2[i,1] = 100*(demand_agg1[i] - demand_agg[i])/demand_agg[i]
+  elasmat2[i,2] = 100*(demand_agg2[i] - demand_agg[i])/demand_agg[i]
+  elasmat2[i,3] = 100*(demand_agg3[i] - demand_agg[i])/demand_agg[i]
+}
+
+elasmat2
+#            KB         KR         MB
+# KB -4.5085930  0.8852135  1.1244311
+# KR  0.7493964 -3.4091901  0.7789112
+# MB  1.0457531  0.8561681 -4.3941389
+```
+
+Now cross-price elasticity: 
+
+Destination matters now.(including segs eliminate the "independence from irrelevant alternatives" thing)
+
+1)KR has lower own-elas
+2)KB and MB are closer substitutes than KR
+(we cannot see without segmentation)
+
+
+
+
+```{r}
+### Scatter Plot for the nature of consumer segments ###
+#Scatterplot of parameters - beta_0^{KB}-beta_0^{KR} against beta_1.
+coef.est[,2]-coef.est[,3]>0
+#KB-lover: Blue 1/2/5/8/10/11
+#KR-lover: Red  3/4/6/7/9
+
+plot(coef.est[1,2]-coef.est[1,3],coef.est[1,5],cex=20*seg.share[1],xlim=c(-3,3),ylim=c(-9,0),
+     col = "blue",pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta_0^KB-beta_0^KR",ylab=("beta_1"))
+points(coef.est[2,2]-coef.est[2,3],coef.est[2,5],cex=20*seg.share[2],col = "blue",pch=16)
+points(coef.est[3,2]-coef.est[3,3],coef.est[3,5],cex=20*seg.share[3],col = "red",pch=16)
+points(coef.est[4,2]-coef.est[4,3],coef.est[4,5],cex=20*seg.share[4],col = "red",pch=16)
+points(coef.est[5,2]-coef.est[5,3],coef.est[5,5],cex=20*seg.share[5],col = "blue",pch=16)
+points(coef.est[6,2]-coef.est[6,3],coef.est[6,5],cex=20*seg.share[6],col = "red",pch=16)
+points(coef.est[7,2]-coef.est[7,3],coef.est[7,5],cex=20*seg.share[7],col = "red",pch=16)
+points(coef.est[8,2]-coef.est[8,3],coef.est[8,5],cex=20*seg.share[8],col = "blue",pch=16)
+points(coef.est[9,2]-coef.est[9,3],coef.est[9,5],cex=20*seg.share[9],col = "red",pch=16)
+points(coef.est[10,2]-coef.est[10,3],coef.est[10,5],cex=20*seg.share[10],col = "blue",pch=16)
+points(coef.est[11,2]-coef.est[11,3],coef.est[11,5],cex=20*seg.share[11],col = "blue",pch=16) 
+
+```
+
+Blue(KB-lover) segments are more price sensitive then red(KR-lover) segments.
+And they like KB more, they are more price-sensitive 
+
+
+
+#If KB does not exist,what would they choose? 
+
+```{r}
+#Scatterplot of parameters - beta_0^{KR}-beta_0^{MB} against beta_1.
+plot(coef.est[1,3]-coef.est[1,4],coef.est[1,5],cex=20*seg.share[1],xlim=c(-3,3),ylim=c(-9,0),
+     col = "blue",pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta_0^KR-beta_0^MB",ylab=("beta_1"))
+points(coef.est[2,3]-coef.est[2,4],coef.est[2,5],cex=20*seg.share[2],col = "blue",pch=16)
+points(coef.est[3,3]-coef.est[3,4],coef.est[3,5],cex=20*seg.share[3],col = "red",pch=16)
+points(coef.est[4,3]-coef.est[4,4],coef.est[4,5],cex=20*seg.share[4],col = "red",pch=16)
+points(coef.est[5,3]-coef.est[5,4],coef.est[5,5],cex=20*seg.share[5],col = "blue",pch=16)
+points(coef.est[6,3]-coef.est[6,4],coef.est[6,5],cex=20*seg.share[6],col = "red",pch=16)
+points(coef.est[7,3]-coef.est[7,4],coef.est[7,5],cex=20*seg.share[7],col = "red",pch=16)
+points(coef.est[8,3]-coef.est[8,4],coef.est[8,5],cex=20*seg.share[8],col = "blue",pch=16)
+points(coef.est[9,3]-coef.est[9,4],coef.est[9,5],cex=20*seg.share[9],col = "red",pch=16)
+points(coef.est[10,3]-coef.est[10,4],coef.est[10,5],cex=20*seg.share[10],col = "blue",pch=16)
+points(coef.est[11,3]-coef.est[11,4],coef.est[11,5],cex=20*seg.share[11],col = "blue",pch=16)
+```
+#The Blue segment will prefer MB. The red segment will still prefer KR. 
+#The Blue segment is actually a Bubble Segment.
+Can explain the substitution patterns:
+Regular segments: like KR only/less price sensitive/ won't change to Bubbles/cross-elas small.
+Bubble segments: more price sensitive/change to another Bubble/cross-elas big.
+
+```{r}
+##3D-plot##
+KB_KR = coef.est[,2]-coef.est[,3]
+KR_MB = coef.est[,3]-coef.est[,4]
+B1 = coef.est[,5]
+group = ifelse(coef.est[,2]-coef.est[,3]>0,"Red","Blue")
+
+library(rgl)
+
+
+attach(mtcars)
+
+
+a=group
+levels(a)=c("Red","Green")
+plot3d(KB_KR,KR_MB,B1,col = group, size=5)
+
+
+```
+
+
+# 3) decision on launch Kiwi Bubbles
+##################
+### Why we launch KB? ###
+Without KB, KR and MB are different in two dimensions.
+Those who buy MB: 1)loyal to Mango 2)loyal to Bubbles (and we find out that the truth is 2)
+If we launch KB, who is our targeting? Those who used to buy other bubbles(MB).
+
+### Positioning of KB ###
+KR marketshare goes down, but it is targeting niche lucrative consumers at a higher price.
+(but without KB, KR must set a lower price to try cover both Bubble and Regular segment)
+It is the result we want from this positioning strategy.
+With segmentation, the profit improvement is limited.Demographic can not perfectly capture the hetero demand systems.
+
+Mango's problem:
+Without KB, Mango still has small share, there exists a chunk of people who like Bubbles, but they buy nothing. Remenber the Bubble segment is quite price sensitive. If MB set price at 1.43, that's too high.
+
+IF MB set a lower price, after launching KB, there will be more MB buyers stolen(then a higher MB price)
+
+
+```{r}
+#profit function#
+
+profit.seglogit=function(priceKB,priceKR,priceMB,para){
+  profitKB=1000*demand.agg(priceKB,priceKR,priceMB,para)*(priceKB-uc)
+  profitKR=1000*demand.agg(priceKB,priceKR,priceMB,para)*(priceKR-uc)
+  profitMB=1000*demand.agg(priceKB,priceKR,priceMB,para)*(priceMB-uc)
+  return(cbind(profitKB,profitKR,profitMB))
+}
+
+##optimize the price of KB and KR#
+
+aux=seq(0.8,2,0.01)
+pricespace=expand.grid(aux,aux)
+
+profitmat2=matrix(0L,nrow(pricespace),1)
+for (i in 1:nrow(pricespace)){
+    profitmat2[i]=profit.seglogit(pricespace[i,1],pricespace[i,2],priceMB_3,coef.est)[1]+profit.seglogit(pricespace[i,1],pricespace[i,2],priceMB_3,coef.est)[2]
+}
+
+#answer for optimal price
+price_profit2 = cbind(pricespace,profitmat2)
+price_profit2[which.max(profitmat2),]
+
+
+##optimize the price for KR when there is no KB in the market#
+
+profitmat3=matrix(0L,length(aux),1)
+for (i in 1:length(aux)){
+    profitmat3[i]=profit.seglogit(10000,aux[i],priceMB_3,coef.est)[2]
+}
+price_profit3 = cbind(aux,profitmat3)
+price_profit3[which.max(profitmat3),]
+
+```
+
+
+
+### 4) what if MB also optimizes its price#
+
+```{r}
+
+
+profitmaxKiwi = function(priceMB,para){
+  
+  profitmat_kiwi=matrix(0L,nrow(pricespace),1)
+  for (i in 1:nrow(pricespace)){
+      profitmat_kiwi[i]=profit.seglogit(pricespace[i,1],pricespace[i,2],priceMB,para)[2]
+  }
+  price_profit_kiwi = cbind(pricespace,profitmat_kiwi)
+  return(price_profit_kiwi[which.max(profitmat_kiwi),][c(1,2)])
+
+}
+
+
+profitmaxMango = function(priceKB,priceKR,para){
+  profitmat_mango=matrix(0L,length(aux),1)
+  for (i in 1:length(aux)){
+    profitmat_mango[i]=profit.seglogit(priceKB,priceKR,aux[i],coef.est)[3]
+  }
+  price_profit_mango = cbind(aux,profitmat_mango)
+  return(price_profit_mango[which.max(profitmat_mango),][1])
+ 
+  
+}
+
+
+
+```
+
+
+
+
+
+
+## 5) latent segmentations
+```{r}
+library("dummies")
+library("AER")
+library("rgl")
+library("mlogit")
+library("gmnl")
+library("data.table")
+library("Rfast")
+library('RColorBrewer')
+library("plotly")
+library("dplyr")
+##
+#Read data
+#In order to calculate BIC, use "kiwi_bubbles.csv". In order to replicate Project 2 with latent 
+#segments, use "kiwi_bubbles_P2.csv". The same applies to "demo".
+data=fread("kiwi_bubbles_P2.csv",stringsAsFactors = F)
+#Load demographic data
+demo=fread("demo_P2.csv",stringsAsFactors = F)
+#Merge with original data
+data=merge(data,demo,by="id")
+
+data=data[!(data$price.KB==99),]
+data=data[!(data$price.KR==99),]
+data=data[!(data$price.MB==99),]
+
+meanPKB=mean(data$price.KB)
+meanPKR=mean(data$price.KR)
+meanPMB=mean(data$price.MB)
+
+#Re-number the id - use only those who remain in the data.
+#Unlike demographic-based segmenting, proportion is estimated along with other parameters.
+#Hence no way we can include those without purchase data in calculating the proportion.
+data$id=data%>% group_indices(id)
+```
+
+
+```{r}
+##
+#Baseline model without any segmentation
+mlogitdata=mlogit.data(data,id="id",varying=4:7,choice="choice",shape="wide")
+
+#Run MLE.
+mle= gmnl(choice ~  price, data = mlogitdata)
+summary(mle)
+BIC(mle)
+```
+
+
+```{r}
+##
+#Run two-type model
+lc2=gmnl(choice~price|1|0|0|1,data=mlogitdata,model='lc',Q=2,panel=TRUE)
+summary(lc2)
+
+BIC(lc2)
+#BIC improves.
+
+coef.est=rbind(c(1,lc2$coefficients[1:4]),c(2,lc2$coefficients[5:8]))
+seg.share=c(exp(0)/(exp(0)+exp(lc2$coefficients[9])),exp(lc2$coefficients[9])/(exp(0)+exp(lc2$coefficients[9])))
+```
+
+
+```{r}
+#Plot results
+#Define demand function
+demand=function(priceKB,priceKR,priceMB,para){
+  probKB=exp(para[1]+para[4]*priceKB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  probKR=exp(para[2]+para[4]*priceKR)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  probMB=exp(para[3]+para[4]*priceMB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  return(cbind(probKB,probKR,probMB))
+}
+```
+
+
+```{r}
+#Set number of segments 
+NC=2
+
+#Plot demand
+pricespace=seq(0.5,1.8,0.01)
+plot(pricespace,demand(pricespace,meanPKR,meanPMB,as.numeric(coef.est[1,2:5]))[,1],type='l',xlab='Prices',
+     ylab='Probability of buying KB',col="blue",lwd=10*seg.share[1],ylim=c(0,1),
+     cex=2,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+for (seg in 2:(NC)) {
+  lines(pricespace,demand(pricespace,meanPKR,meanPMB,as.numeric(coef.est[seg,2:5]))[,1],col="blue",lwd=10*seg.share[seg])
+}
+```
+
+
+```{r}
+#Set number of segments 
+NC=4
+
+#Run four type model
+lc4=gmnl(choice~price|1|0|0|1,data=mlogitdata,model='lc',Q=NC,panel=TRUE)
+summary(lc4)
+BIC4=log(length(data$id))*length(lc4$coefficients)-2*lc4$logLik$maximum[1]
+BIC4
+
+coef.est=matrix(0L,NC,5)
+coef.est = data.frame(segment = 1:NC, intercept.KB = NA, intercept.KR = NA, 
+                      intercept.MB = NA, price.coef = NA) 
+for (i in 1:NC){
+  coef.est[i,]=rbind(c(i,lc4$coefficients[((i-1)*4+1):(i*4)]))
+}
+
+seg.share=matrix(0L,NC,1)
+for (i in 2:NC){
+   denom=1+sum(exp(lc4$coefficients[(NC*4+1):(NC*4+NC-1)]))
+   seg.share[i]=exp(lc4$coefficients[(NC*4+i-1)])/denom
+}
+seg.share[1]=1/(1+sum(exp(lc4$coefficients[(NC*4+1):(NC*4+NC-1)])))
+seg.share=as.double(seg.share)
+```
+
+
+```{r}
+#Plot demand
+pricespace=seq(0.5,1.8,0.01)
+plot(pricespace,demand(pricespace,meanPKR,meanPMB,as.numeric(coef.est[1,2:5]))[,1],type='l',xlab='Prices',
+     ylab='Probability of buying KB',col="blue",lwd=10*seg.share[1],ylim=c(0,1),
+     cex=2,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+for (seg in 2:(NC)) {
+  lines(pricespace,demand(pricespace,meanPKR,meanPMB,as.numeric(coef.est[seg,2:5]))[,1],col="blue",lwd=10*seg.share[seg])
+}
+```
+
+
+```{r}
+colorset2=c("blue","green","orange","red")
+#Scatterplot of parameters KB against KR
+colorset=c("red","blue","green")
+plot(coef.est[1,2]-coef.est[1,3],coef.est[1,5],cex=20*seg.share[1],xlim=c(-4,4),ylim=c(-8,-0.7),
+     col = colorset2[1],pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta0KB-beta0KR",ylab=("beta1"))
+for (seg in 2:NC) {
+  points(coef.est[seg,2]-coef.est[seg,3],coef.est[seg,5],cex=20*seg.share[seg],col = colorset2[seg],pch=16)
+}
+legend(1.2, -0.4, legend=c("Bubble type", "KB type", "KR type", "MB type"),
+       col=c( "blue","orange","red","green"), pch=16, cex=1.1)
+
+#KR against MB
+plot(coef.est[1,3]-coef.est[1,4],coef.est[1,5],cex=20*seg.share[1],xlim=c(-4,4),ylim=c(-8,-1),
+     col = colorset2[1],pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta0KR-beta0MB",ylab=("beta1"))
+for (seg in 2:NC) {
+  points(coef.est[seg,3]-coef.est[seg,4],coef.est[seg,5],cex=20*seg.share[seg],col = colorset2[seg],pch=16)
+}
+legend(1.2, -5.3, legend=c("Bubble type", "KB type", "KR type", "MB type"),
+       col=c( "blue","orange","red","green"), pch=16, cex=1.1)
+```
+
+
+```{r}
+#Consider targeting in this market.
+
+#Calculate coefficient using prior proportion (w_k)
+priorcoef=colSums(seg.share*coef.est[,2:5])
+
+#Calculate each consumer's predicted beta0 and beta1 using posterior.
+aux=effect.gmnl(lc4)
+postcoef=aux$mean
+
+
+#Check if the posterior makes sense.
+#Those who buy a lot of KR
+i=3
+subdata=data[data$id==i,]
+subdata$choice
+
+postcoef[3,]
+coef.est[4,2:5]
+
+
+#Those who buy a lot of KB
+i=11
+subdata=data[data$id==i,]
+subdata$choice
+
+postcoef[11,]
+coef.est
+
+#Those who never buy any
+i=4
+subdata=data[data$id==i,]
+subdata$choice
+
+postcoef[4,]
+priorcoef
+```
+
+
+```{r}
+#Histogram of WTP
+#KB
+hist(-postcoef[,1]/postcoef[,4],
+     cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="Willingness to pay for KB",ylab=("Density"),main="")
+#KR
+hist(-postcoef[,2]/postcoef[,4],
+     cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="Willingness to pay for KR",ylab=("Density"),main="")
+
+
+
+#Scatterplot of parameters KB against KR
+plot(as.matrix(postcoef[,1]-postcoef[,2]),as.matrix(postcoef[,4]),cex=1,xlim=c(-3,3),ylim=c(-6.5,-1),
+     col = "chocolate",pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta0KB-beta0KR",ylab="beta1")
+#overlay with model-predicted segments
+for (seg in 1:NC) {
+  points(coef.est[seg,2]-coef.est[seg,3],coef.est[seg,5],cex=20*seg.share[seg],col = colorset2[seg],pch=1)
+}
+legend(1.2, -0.7, legend=c("Bubble type", "KB type", "KR type", "MB type"),
+       col=c( "blue","orange","red","green"), pch=1, cex=1.1)
+
+
+
+
+#Scatterplot of parameters KB against KR
+colorset=c("red","blue","green","orange")
+colorvec=(postcoef[,1]-postcoef[,2]<(-1.5))+2*(((postcoef[,1]-postcoef[,2])>0.8)&(postcoef[,4]<(-5)))+3*(((postcoef[,1]-postcoef[,2])<0.8)&((postcoef[,1]-postcoef[,2])>(-1.5)))+4*(((postcoef[,1]-postcoef[,2])>0.8)&(postcoef[,4]>(-5)))
+
+plot(postcoef[1,1]-postcoef[1,2],postcoef[1,4],cex=1,xlim=c(-3,3),ylim=c(-6.5,-1),
+     col = colorset[colorvec[1]],pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta0KB-beta0KR",ylab=("beta1"))
+for (seg in 2:nrow(postcoef)) {
+  points(postcoef[seg,1]-postcoef[seg,2],postcoef[seg,4],cex=1,col = colorset[colorvec[seg]],pch=16)
+}
+for (seg in 1:NC) {
+  points(coef.est[seg,2]-coef.est[seg,3],coef.est[seg,5],cex=20*seg.share[seg],col = colorset2[seg],pch=1)
+}
+legend(0.6, -0.7, legend=c("Likely bubble type", "Likely KB type", "Likely KR type", "Likely MB type"),
+       col=c( "blue","orange","red","green"), pch=16, cex=1.1)
+
+
+
+#Scatterplot of parameters KR against MB
+plot(postcoef[1,2]-postcoef[1,3],postcoef[1,4],cex=1,xlim=c(-3,4),ylim=c(-6.5,-1),
+     col = colorset[colorvec[1]],pch=16,cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5,
+     xlab="beta0KR-beta0MB",ylab=("beta1"))
+for (seg in 2:nrow(postcoef)) {
+  points(postcoef[seg,2]-postcoef[seg,3],postcoef[seg,4],cex=1,col = colorset[colorvec[seg]],pch=16)
+}
+for (seg in 1:NC) {
+  points(coef.est[seg,3]-coef.est[seg,4],coef.est[seg,5],cex=20*seg.share[seg],col = colorset2[seg],pch=1)
+}
+legend(-3, -0.7, legend=c("Likely bubble type", "Likely KB type", "Likely KR type", "Likely MB type"),
+       col=c( "blue","orange","red","green"), pch=16, cex=1.1)
+
+
+
+
+
+
+```
+
